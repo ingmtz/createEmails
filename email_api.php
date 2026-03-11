@@ -38,10 +38,50 @@ declare(strict_types=1);
 header('Content-Type: application/json; charset=utf-8');
 header('Cache-Control: no-store');
 
+function load_env_file(string $path): void {
+    if (!is_file($path) || !is_readable($path)) return;
+
+    $lines = @file($path, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
+    if (!is_array($lines)) return;
+
+    foreach ($lines as $line) {
+        $line = trim($line);
+        if ($line === '' || strpos($line, '#') === 0) continue;
+        if (strpos($line, '=') === false) continue;
+
+        [$k, $v] = explode('=', $line, 2);
+        $k = trim($k);
+        $v = trim($v);
+        if ($k === '') continue;
+
+        // Remove matching wrapping quotes
+        $len = strlen($v);
+        if ($len >= 2) {
+            $first = $v[0];
+            $last = $v[$len - 1];
+            if (($first === '"' && $last === '"') || ($first === "'" && $last === "'")) {
+                $v = substr($v, 1, -1);
+            }
+        }
+
+        // Do not override already-defined environment variables
+        if (getenv($k) === false) {
+            putenv($k . '=' . $v);
+            $_ENV[$k] = $v;
+            $_SERVER[$k] = $v;
+        }
+    }
+}
+
+load_env_file(__DIR__ . '/.env');
+
 function envv(string $key, ?string $default = null): ?string {
     $v = getenv($key);
+    if ($v === false || $v === null || $v === '') {
+        $v = $_ENV[$key] ?? ($_SERVER[$key] ?? null);
+    }
     if ($v === false || $v === null || $v === '') return $default;
-    return $v;
+    return (string)$v;
 }
 
 function bool_env(string $key, bool $default): bool {
