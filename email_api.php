@@ -269,6 +269,8 @@ if ($action === '') {
 
 switch ($action) {
     case 'list_emails': {
+        $rawMode = !empty($data['raw']);
+
         $res = cpanel_request('list_pops');
         if (!$res['ok']) respond(502, $res);
 
@@ -278,24 +280,54 @@ switch ($action) {
         $emails = [];
         foreach ($items as $it) {
             if (!is_array($it)) continue;
+
             $email = (string)($it['email'] ?? '');
-            if ($email === '' && isset($it['user'], $it['domain'])) {
-                $email = $it['user'] . '@' . $it['domain'];
+            $user = $it['user'] ?? null;
+            $domain = $it['domain'] ?? null;
+
+            if ($email === '' && $user && $domain) {
+                $email = $user . '@' . $domain;
             }
+
+            // Derive user/domain from email when API leaves them null
+            if (($user === null || $user === '') || ($domain === null || $domain === '')) {
+                if (strpos($email, '@') !== false) {
+                    [$derivedUser, $derivedDomain] = explode('@', $email, 2);
+                    if ($user === null || $user === '') $user = $derivedUser;
+                    if ($domain === null || $domain === '') $domain = $derivedDomain;
+                }
+            }
+
             if ($email !== '') {
                 $emails[] = [
                     'email' => $email,
-                    'user' => $it['user'] ?? null,
-                    'domain' => $it['domain'] ?? null,
+                    'user' => $user,
+                    'domain' => $domain,
                     'suspended_login' => $it['suspended_login'] ?? null,
                     'suspended_incoming' => $it['suspended_incoming'] ?? null,
-                    'diskused_mb' => $it['diskusedpercent_float'] ?? ($it['diskused'] ?? null),
-                    'quota_mb' => $it['quota'] ?? null,
+                    // Try multiple possible field names from different cPanel builds
+                    'diskused_mb' => $it['diskused_mb'] ?? ($it['diskused'] ?? ($it['diskusedpercent_float'] ?? null)),
+                    'quota_mb' => $it['quota_mb'] ?? ($it['quota'] ?? null),
                 ];
             }
         }
 
         usort($emails, fn($a, $b) => strcasecmp((string)$a['email'], (string)$b['email']));
+
+        if ($rawMode) {
+            $firstRaw = $items[0] ?? null;
+            $rawKeys = is_array($firstRaw) ? array_keys($firstRaw) : [];
+            respond(200, [
+                'ok' => true,
+                'count' => count($emails),
+                'emails' => $emails,
+                'debug' => [
+                    'raw_keys_first_item' => $rawKeys,
+                    'raw_first_item' => $firstRaw,
+                ],
+            ]);
+        }
+
         respond(200, ['ok' => true, 'count' => count($emails), 'emails' => $emails]);
     }
 
