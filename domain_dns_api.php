@@ -227,8 +227,79 @@ function cpanel_request(string $module, string $function, array $params = []): a
     return ['ok' => true, 'status' => $status, 'cpanel' => $json];
 }
 
+function cpanel_api2_request(string $module, string $function, array $params = []): array {
+    $host = envv('CPANEL_HOST');
+    $user = envv('CPANEL_USER');
+    $token = envv('CPANEL_TOKEN');
+    $pass = envv('CPANEL_PASS');
+    $verifySSL = bool_env('VERIFY_SSL', true);
+
+    if (!$host || !$user || (!$token && !$pass)) {
+        respond(500, ['ok' => false, 'error' => 'Server misconfigured: cPanel credentials missing']);
+    }
+
+    $query = [
+        'cpanel_jsonapi_user' => $user,
+        'cpanel_jsonapi_apiversion' => 2,
+        'cpanel_jsonapi_module' => $module,
+        'cpanel_jsonapi_func' => $function,
+    ] + $params;
+
+    $url = 'https://' . $host . ':2083/json-api/cpanel?' . http_build_query($query);
+
+    $ch = curl_init($url);
+    curl_setopt_array($ch, [
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_TIMEOUT => 30,
+        CURLOPT_CONNECTTIMEOUT => 10,
+        CURLOPT_SSL_VERIFYPEER => $verifySSL,
+        CURLOPT_SSL_VERIFYHOST => $verifySSL ? 2 : 0,
+        CURLOPT_HTTPHEADER => array_filter([
+            'Accept: application/json',
+            $token ? ('Authorization: cpanel ' . $user . ':' . $token) : null,
+        ]),
+    ]);
+
+    if (!$token) {
+        curl_setopt($ch, CURLOPT_HTTPAUTH, CURLAUTH_BASIC);
+        curl_setopt($ch, CURLOPT_USERPWD, $user . ':' . $pass);
+    }
+
+    $body = curl_exec($ch);
+    $err = curl_error($ch);
+    $status = (int)curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
+    curl_close($ch);
+
+    if ($body === false) {
+        return ['ok' => false, 'status' => 0, 'error' => 'cURL error: ' . $err];
+    }
+
+    $json = json_decode($body, true);
+    if (!is_array($json)) {
+        return ['ok' => false, 'status' => $status, 'error' => 'Non-JSON response from cPanel API2', 'raw' => substr($body, 0, 500)];
+    }
+
+    $result = $json['cpanelresult'] ?? null;
+    if (!is_array($result)) {
+        return ['ok' => false, 'status' => $status, 'error' => 'Malformed API2 response', 'cpanel' => $json];
+    }
+
+    $event = $result['event'] ?? [];
+    $ok = (int)($event['result'] ?? 0) === 1;
+    if (!$ok) {
+        $msg = (string)($event['reason'] ?? 'cPanel API2 call failed');
+        return ['ok' => false, 'status' => $status, 'error' => $msg, 'cpanel' => $json];
+    }
+
+    return ['ok' => true, 'status' => $status, 'cpanel' => $json];
+}
+
 function pick_data(array $res) {
     return $res['cpanel']['data'] ?? ($res['cpanel']['result']['data'] ?? null);
+}
+
+function pick_api2_data(array $res) {
+    return $res['cpanel']['cpanelresult']['data'] ?? null;
 }
 
 if (($_SERVER['REQUEST_METHOD'] ?? '') !== 'POST') {
@@ -328,12 +399,21 @@ switch ($action) {
     case 'list_dns_records': {
         $domain = require_domain($data);
         $res = cpanel_request('ZoneEdit', 'fetchzone_records', ['domain' => $domain]);
-        if (!$res['ok']) respond(502, $res);
+
+        if (!$res['ok']) {
+            // Fallback for environments where UAPI ZoneEdit module is unavailable
+            $res2 = cpanel_api2_request('ZoneEdit', 'fetchzone_records', ['domain' => $domain]);
+            if (!$res2['ok']) respond(502, ['ok' => false, 'uapi_error' => $res, 'api2_error' => $res2]);
+
+            $records = pick_api2_data($res2);
+            if (!is_array($records)) $records = [];
+            respond(200, ['ok' => true, 'domain' => $domain, 'count' => count($records), 'records' => $records, 'source' => 'api2']);
+        }
 
         $records = pick_data($res);
         if (!is_array($records)) $records = [];
 
-        respond(200, ['ok' => true, 'domain' => $domain, 'count' => count($records), 'records' => $records]);
+        respond(200, ['ok' => true, 'domain' => $domain, 'count' => count($records), 'records' => $records, 'source' => 'uapi']);
     }
 
     case 'add_dns_record': {
@@ -345,9 +425,13 @@ switch ($action) {
 
         $params = ['domain' => $domain] + $record;
         $res = cpanel_request('ZoneEdit', 'add_zone_record', $params);
-        if (!$res['ok']) respond(502, $res);
+        if (!$res['ok']) {
+            $res2 = cpanel_api2_request('ZoneEdit', 'add_zone_record', $params);
+            if (!$res2['ok']) respond(502, ['ok' => false, 'uapi_error' => $res, 'api2_error' => $res2]);
+            respond(200, ['ok' => true, 'message' => 'DNS record added', 'domain' => $domain, 'result' => pick_api2_data($res2), 'source' => 'api2']);
+        }
 
-        respond(200, ['ok' => true, 'message' => 'DNS record added', 'domain' => $domain, 'result' => pick_data($res)]);
+        respond(200, ['ok' => true, 'message' => 'DNS record added', 'domain' => $domain, 'result' => pick_data($res), 'source' => 'uapi']);
     }
 
     case 'edit_dns_record': {
@@ -360,9 +444,13 @@ switch ($action) {
 
         $params = ['domain' => $domain, 'line' => $line] + $record;
         $res = cpanel_request('ZoneEdit', 'edit_zone_record', $params);
-        if (!$res['ok']) respond(502, $res);
+        if (!$res['ok']) {
+            $res2 = cpanel_api2_request('ZoneEdit', 'edit_zone_record', $params);
+            if (!$res2['ok']) respond(502, ['ok' => false, 'uapi_error' => $res, 'api2_error' => $res2]);
+            respond(200, ['ok' => true, 'message' => 'DNS record updated', 'domain' => $domain, 'line' => $line, 'result' => pick_api2_data($res2), 'source' => 'api2']);
+        }
 
-        respond(200, ['ok' => true, 'message' => 'DNS record updated', 'domain' => $domain, 'line' => $line, 'result' => pick_data($res)]);
+        respond(200, ['ok' => true, 'message' => 'DNS record updated', 'domain' => $domain, 'line' => $line, 'result' => pick_data($res), 'source' => 'uapi']);
     }
 
     case 'delete_dns_record': {
@@ -370,10 +458,15 @@ switch ($action) {
         $line = isset($data['line']) ? (int)$data['line'] : 0;
         if ($line <= 0) respond(400, ['ok' => false, 'error' => 'line must be > 0']);
 
-        $res = cpanel_request('ZoneEdit', 'remove_zone_record', ['domain' => $domain, 'line' => $line]);
-        if (!$res['ok']) respond(502, $res);
+        $params = ['domain' => $domain, 'line' => $line];
+        $res = cpanel_request('ZoneEdit', 'remove_zone_record', $params);
+        if (!$res['ok']) {
+            $res2 = cpanel_api2_request('ZoneEdit', 'remove_zone_record', $params);
+            if (!$res2['ok']) respond(502, ['ok' => false, 'uapi_error' => $res, 'api2_error' => $res2]);
+            respond(200, ['ok' => true, 'message' => 'DNS record deleted', 'domain' => $domain, 'line' => $line, 'source' => 'api2']);
+        }
 
-        respond(200, ['ok' => true, 'message' => 'DNS record deleted', 'domain' => $domain, 'line' => $line]);
+        respond(200, ['ok' => true, 'message' => 'DNS record deleted', 'domain' => $domain, 'line' => $line, 'source' => 'uapi']);
     }
 
     default:
