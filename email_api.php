@@ -13,11 +13,15 @@
  * - Strict action allowlist (no shell command execution)
  *
  * REQUIRED ENV VARS
- * - EMAIL_API_TOKEN=long_random_token_here
  * - CPANEL_HOST=your-cpanel-host.com
  * - CPANEL_USER=your-cpanel-username
  * - CPANEL_TOKEN=your_cpanel_api_token   (preferred)
  *   or CPANEL_PASS=your_cpanel_password
+ *
+ * AUTH TOKEN SOURCE (Authorization: Bearer ...)
+ * - EMAIL_API_TOKEN (preferred dedicated API token)
+ * - Fallback: CPANEL_TOKEN (compatible with existing .env.example)
+ * - Last resort fallback: CPANEL_PASS
  *
  * OPTIONAL ENV VARS
  * - VERIFY_SSL=true|false            (default true)
@@ -102,9 +106,15 @@ function get_header_value(string $name): ?string {
 }
 
 function require_bearer_token(): void {
+    // Backward-compatible token resolution:
+    // 1) EMAIL_API_TOKEN (preferred dedicated API token)
+    // 2) CPANEL_TOKEN (fallback so existing .env.example works unchanged)
+    // 3) CPANEL_PASS (last-resort fallback when token is unavailable)
     $expected = envv('EMAIL_API_TOKEN');
+    if (!$expected) $expected = envv('CPANEL_TOKEN');
+    if (!$expected) $expected = envv('CPANEL_PASS');
     if (!$expected) {
-        respond(500, ['ok' => false, 'error' => 'Server misconfigured: EMAIL_API_TOKEN missing']);
+        respond(500, ['ok' => false, 'error' => 'Server misconfigured: missing EMAIL_API_TOKEN/CPANEL_TOKEN/CPANEL_PASS for auth']);
     }
 
     $auth = get_header_value('Authorization') ?? '';
