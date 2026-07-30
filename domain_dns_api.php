@@ -469,6 +469,82 @@ switch ($action) {
         respond(200, ['ok' => true, 'message' => 'DNS record deleted', 'domain' => $domain, 'line' => $line, 'source' => 'uapi']);
     }
 
+    case 'add_mx_record': {
+        // cPanel ZoneEdit::add_zone_record refuses MX ("You may only add
+        // A, AAAA, CAA, CNAME, NS, SRV or TXT records.") — MX must be
+        // added via cPanel's Email::addmx UAPI.  We use that here and
+        // accept the same record params as add_dns_record plus a target
+        // exchange + preference (default 0).
+        //
+        // Params (POST JSON):
+        //   action:    "add_mx_record"
+        //   domain:    "example.com"
+        //   exchange:  "mail.example.com."  (target host, trailing dot ok)
+        //   preference:(int) 0..100, default 0
+        //   optional keys:
+        //     name:    relative subdomain for the MX record, default '' (apex)
+        //     ttl:     default 14400
+        //
+        $domain    = require_domain($data);
+        $exchange  = $data['exchange']   ?? null;
+        $preference= isset($data['preference']) ? (int)$data['preference'] : 0;
+        $name      = $data['name']       ?? '';
+        $ttl       = isset($data['ttl']) ? (int)$data['ttl'] : 14400;
+        if (!$exchange) {
+            respond(400, ['ok' => false, 'error' => 'exchange is required (e.g. "mail.example.com.")']);
+        }
+        if ($preference < 0 || $preference > 100) {
+            respond(400, ['ok' => false, 'error' => 'preference must be between 0 and 100']);
+        }
+        // Strip accidental trailing dot from exchange — cPanel stores it without
+        $exchange = rtrim($exchange, '.');
+
+        $params = [
+            'domain'     => $domain,
+            'name'       => $name,
+            'exchange'   => $exchange,
+            'preference' => (string)$preference,
+            'ttl'        => (string)$ttl,
+        ];
+
+        $res = cpanel_request('Email', 'addmx', $params);
+        if (!$res['ok']) {
+            // Some hosts expose addmx only via API2 or under a different name
+            $res2 = cpanel_api2_request('Email', 'addmx', $params);
+            if (!$res2['ok']) respond(502, ['ok' => false, 'uapi_error' => $res, 'api2_error' => $res2]);
+            respond(200, ['ok' => true, 'message' => 'MX record added', 'domain' => $domain, 'exchange' => $exchange, 'preference' => $preference, 'name' => $name, 'result' => pick_api2_data($res2), 'source' => 'api2']);
+        }
+
+        respond(200, ['ok' => true, 'message' => 'MX record added', 'domain' => $domain, 'exchange' => $exchange, 'preference' => $preference, 'name' => $name, 'result' => pick_data($res), 'source' => 'uapi']);
+    }
+
+    case 'rem_mx_record': {
+        // Companion to add_mx_record: remove a single MX entry.
+        // cPanel Email::remmx takes the {name, exchange, preference} tuple
+        // (no domain).  name='' matches the apex MX.
+        //
+        $domain    = require_domain($data);
+        $exchange  = $data['exchange']   ?? null;
+        $preference= isset($data['preference']) ? (int)$data['preference'] : 0;
+        $name      = $data['name']       ?? '';
+        if (!$exchange) {
+            respond(400, ['ok' => false, 'error' => 'exchange is required']);
+        }
+        $exchange = rtrim($exchange, '.');
+        $params = [
+            'name'       => $name,
+            'exchange'   => $exchange,
+            'preference' => (string)$preference,
+        ];
+        $res = cpanel_request('Email', 'remmx', $params);
+        if (!$res['ok']) {
+            $res2 = cpanel_api2_request('Email', 'remmx', $params);
+            if (!$res2['ok']) respond(502, ['ok' => false, 'uapi_error' => $res, 'api2_error' => $res2]);
+            respond(200, ['ok' => true, 'message' => 'MX record deleted', 'domain' => $domain, 'result' => pick_api2_data($res2), 'source' => 'api2']);
+        }
+        respond(200, ['ok' => true, 'message' => 'MX record deleted', 'domain' => $domain, 'result' => pick_data($res), 'source' => 'uapi']);
+    }
+
     default:
         respond(400, ['ok' => false, 'error' => 'Unsupported action']);
 }
